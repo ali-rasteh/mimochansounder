@@ -71,7 +71,7 @@ class Deconv(object):
   
         return txtd, rxtd
 
-    def set_system_resp_data(self, path):
+    def set_system_resp_data(self, path, nframe_avg=1):
         """
         Set the system response from a file.  The MIMO response will be 
         two diagonal transfer functions:
@@ -90,6 +90,9 @@ class Deconv(object):
         txfd = np.fft.fft(txtd, axis=0)  # (nfft,ntx)
         rxfd = np.fft.fft(rxtd, axis=0)  # (nfft,nrx,nframe)
 
+        # Average over the different frames
+        rxfd = np.mean(rxfd[:,:,:nframe_avg], axis=2)
+
         # Noise level assumed for the MMSE 
         snr = 40
         wvar = np.mean(np.abs(rxfd)**2)*(10**(-snr/10))
@@ -98,7 +101,7 @@ class Deconv(object):
         # This only works for ntx=1.
         # Also, we do not average over multiple frames
         S = np.conj(txfd[:,0])/(np.abs(txfd[:,0])**2 + wvar)
-        self.grxfd = S[:,None]*rxfd[:,:,0]
+        self.grxfd = S[:,None]*rxfd
         self.gtxfd = np.ones((self.nfft, self.ntx), dtype=np.complex64)
 
         # Compute the time-domain response
@@ -204,7 +207,8 @@ class Deconv(object):
             h = B.dot(coeffs)
             return h
 
-    def sparse_est(self, npaths=1, nframe_avg=1, ndly=10000, drange=[-6,20]):
+    def sparse_est(self, npaths=1, nframe_avg=1, ndly=10000, drange=[-6,20],
+                   cv=True):
         """
         Estimate the channel response using sparse deconvolution
 
@@ -216,16 +220,39 @@ class Deconv(object):
             Number of paths to estimate
         nframe_avg :int
             Number of frames to average
-       
+        cv : bool
+            If True, use cross-validation to estimate the number of paths
         """
 
-        # Compute the initial channel esitmate via averaging
-        # over the frames
-        self.chan_fd_avg = np.mean(self.chan_fd[:,0,0,:nframe_avg], axis=1)
-        self.chan_td_avg = np.fft.ifft(self.chan_fd_avg, axis=0)
+        # Number of paths stops when test error exceeds training error
+        # by 1+cv_tol
+        cv_tol = 0.1
+
+        # Compute the channel estimates for training and test
+        # by averaging over the different frames
+        nframe = self.chan_fd.shape[3]
+        if cv:
+            if (nframe < 2*nframe_avg):
+                raise ValueError('Not enough frames for cross-validation')
+            Itr = np.arange(0,nframe_avg)*2
+            Its = Itr + 1
+            self.chan_fd_tr = np.mean(self.chan_fd[:,0,0,Itr], axis=1)
+            self.chan_fd_ts = np.mean(self.chan_fd[:,0,0,Its], axis=1)
+
+            # For the FA probability, we set the threhold to the energy
+            # of the max on nfft random basis functions.  The energy
+            # on each basis function is exponential with mean 1/nfft.
+            # So, the maximum energy is exponential with mean 1/nfft* (\sum_k 1/k)
+            t = np.arange(1,self.nfft)
+            cv_dec = (1 - 2*np.sum(1/t)/self.nfft)
+        else:
+            if (nframe < nframe_avg):
+                raise ValueError('Not enough frames for averaging')
+            self.chan_fd_tr = self.chan_fd[:,0,0,:nframe_avg]
+        self.chan_td_tr = np.fft.ifft(self.chan_fd_tr, axis=0)
 
         # Set the delays to test around the peak
-        idx = np.argmax(np.abs(self.chan_td_avg))
+        idx = np.argmax(np.abs(self.chan_td_tr))
         self.dly_test = (idx + np.linspace(drange[0],drange[1],ndly))/self.fsamp
 
         # Create the basis vectors
@@ -234,28 +261,57 @@ class Deconv(object):
         # Use OMP to find the sparse solution
         self.coeff_est = np.zeros(npaths)
         
-        resid = self.chan_fd_avg
+        resid = self.chan_fd_tr
         indices = []
-        self.mse = np.zeros(npaths)
+        indices1 = []
+        self.mse_tr = np.zeros(npaths)
+        self.mse_ts = np.zeros(npaths)
+
+        npaths_est = 0
         for i in range(npaths):
+            
             # Compute the correlation
             cor = np.abs(self.B.conj().T.dot(resid))
 
             # Add the highest correlation to the list
             idx = np.argmax(cor)
-            indices.append(idx)
+            indices1.append(idx)
 
             # Use least squares to estimate the coefficients
-            self.coeffs_est = np.linalg.lstsq(self.B[:,indices], self.chan_fd_avg, rcond=None)[0]
+            self.coeffs_est = np.linalg.lstsq(self.B[:,indices1], self.chan_fd_tr, rcond=None)[0]
 
             # Compute the resulting sparse channel
-            self.chan_fd_sparse = self.B[:,indices].dot(self.coeffs_est)
-            
-            resid = self.chan_fd_avg - self.chan_fd_sparse
+            self.chan_fd_sparse = self.B[:,indices1].dot(self.coeffs_est)
 
-            self.mse[i] = np.mean(np.abs(resid)**2)/np.mean(np.abs(self.chan_fd_avg)**2)
+            # Compute the current residual 
+            resid = self.chan_fd_tr - self.chan_fd_sparse
+            
+            # Compute the MSE on the training data
+            self.mse_tr[i] = np.mean(np.abs(resid)**2)/np.mean(np.abs(self.chan_fd_tr)**2)
+
+            # Compute the MSE on the test data if CV is used
+            if cv:
+                resid_ts = self.chan_fd_ts - self.chan_fd_sparse
+                self.mse_ts[i] = np.mean(np.abs(resid_ts)**2)/np.mean(np.abs(self.chan_fd_ts)**2)
+
+                # Check if path is valid
+                if (i > 0):
+                    if (self.mse_ts[i] > cv_dec*self.mse_ts[i-1]):
+                        break
+                if (self.mse_ts[i] > (1+cv_tol)*self.mse_tr[i]):
+                    break
+
+            # Updated the number of paths
+            npaths_est = i+1
+            indices.append(idx)
 
         self.dly_est = self.dly_test[indices]
+
+        # Use least squares to estimate the coefficients
+        self.coeffs_est = np.linalg.lstsq(self.B[:,indices], self.chan_fd_tr, rcond=None)[0]
+
+        # Compute the resulting sparse channel
+        self.chan_fd_sparse = self.B[:,indices].dot(self.coeffs_est)
         self.chan_td_sparse = np.fft.ifft(self.chan_fd_sparse, axis=0) 
 
         

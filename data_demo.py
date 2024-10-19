@@ -16,6 +16,7 @@ nantrx=2    # Number of antennas per array
 nfft=1024   # Number of FFT points
 nrx = 1     # Number of RX antennas
 ntx = 1     # Number of TX antennas
+nframe_avg = 1 # number of frames for averaging
 
 # Get the file path for the calibration data
 fn = 'siso_trx_cabled.npz'
@@ -32,7 +33,8 @@ dec = Deconv(fc=fc, fsamp=fsamp, nfft=nfft,
              ntx=ntx, nrx=nrx)
 
 # Set the system response
-dec.set_system_resp_data(path=calib_path)
+dec.set_system_resp_data(path=calib_path,
+                         nframe_avg=nframe_avg)
 
 # Compute the channel response
 dec.load_chan_data(data_path)
@@ -40,15 +42,15 @@ dec.compute_chan_resp()
 
 
 # Perform the sparse estimation
-dec.sparse_est(npaths=3, nframe_avg=1, drange=[-6,32], 
-               ndly=5000)
+dec.sparse_est(npaths=20, nframe_avg=nframe_avg,
+               drange=[-6,32], ndly=5000)
 
 
 # Plot the raw response
 dly = np.arange(nfft) 
 dly = dly - nfft*(dly > nfft/2)
 dly = dly / fsamp
-chan_pow = 20*np.log10(np.abs(dec.chan_td_avg))
+chan_pow = 20*np.log10(np.abs(dec.chan_td_tr))
 
 # Roll the response and shift the response
 rots = 32
@@ -70,4 +72,4 @@ plt.ylim([ymin, ymax])
 plt.xlabel('Delay [ns]')
 plt.ylabel('SNR [dB]')
 
-plt.savefig('peaks.png')
+#plt.savefig('peaks.png')
