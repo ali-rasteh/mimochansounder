@@ -3,7 +3,8 @@ import numpy as np
 import os
 
 class Deconv(object):
-    def __init__(self, nfft=1024, fsamp=1e9, fc=6e9, nrx=None, ntx=None):
+    def __init__(self, nfft=1024, fsamp=1e9, fc=6e9, nrx=1, ntx=1, 
+                 file_version=1):
         """
         Parameters
         ----------
@@ -20,12 +21,15 @@ class Deconv(object):
             Number of TX antennas
         dly_test : ndarray
             Delays to test in seconds
+        file_version : int 
+            File version type.  Current 0 or 1
         """
         self.nfft = nfft
         self.fsamp = fsamp
         self.fc = fc
         self.nrx = nrx
         self.ntx = ntx
+        self.file_version = file_version
 
         # Set the default system response
         self.grxfd = None
@@ -54,22 +58,28 @@ class Deconv(object):
 
         # Load the file
         data = np.load(path)
-        txtd = data['txtd']
-        rxtd = data['rxtd']
-
-        # Rearrange the indices so the order (nfft,nrx,nframe)
-        rxtd = np.transpose(rxtd, (2,1,0))
-        txtd = np.transpose(txtd, (2,1,0))
-        txtd = txtd[:,:,0]
-
-        # Reduce the number of antennas if needed
-        if (rxtd.shape[1] > self.nrx):
-            rxtd = rxtd[:,:self.nrx,:]
-        if (txtd.shape[1] > self.ntx):
-            txtd = txtd[:,:self.ntx]
-
+        
+        if self.file_version  == 0:
+            txtd = data['txtd']
+            rxtd = data['rxtd']
+    
+            # Rearrange the indices so the order (nfft,nrx,nframe)
+            rxtd = np.transpose(rxtd, (2,1,0))
+            txtd = np.transpose(txtd, (2,1,0))
+            txtd = txtd[:,:,0]
+    
+            # Reduce the number of antennas if needed
+            if (rxtd.shape[1] > self.nrx):
+                rxtd = rxtd[:,:self.nrx,:]
+            if (txtd.shape[1] > self.ntx):
+                txtd = txtd[:,:self.ntx]
   
-        return txtd, rxtd
+            return txtd, rxtd
+        else:
+            h_est = data['h_est_full']
+            h_est = np.transpose(h_est, (3,1,2,0))  # (nfft,nrx,ntx,nframe)
+            h_est = h_est[:,:self.nrx, :self.ntx, :]
+            return h_est
 
     def set_system_resp_data(self, path, nframe_avg=1):
         """
@@ -84,29 +94,36 @@ class Deconv(object):
         path : str
             Path to the file
         """
-        txtd, rxtd = self.load_data(path)
-
-        # Compute the TX freq domain
-        txfd = np.fft.fft(txtd, axis=0)  # (nfft,ntx)
-        rxfd = np.fft.fft(rxtd, axis=0)  # (nfft,nrx,nframe)
-
-        # Average over the different frames
-        rxfd = np.mean(rxfd[:,:,:nframe_avg], axis=2)
-
-        # Noise level assumed for the MMSE 
-        snr = 40
-        wvar = np.mean(np.abs(rxfd)**2)*(10**(-snr/10))
-
-        # Compute the RX calibration response.
-        # This only works for ntx=1.
-        # Also, we do not average over multiple frames
-        S = np.conj(txfd[:,0])/(np.abs(txfd[:,0])**2 + wvar)
-        self.grxfd = S[:,None]*rxfd
-        self.gtxfd = np.ones((self.nfft, self.ntx), dtype=np.complex64)
-
-        # Compute the time-domain response
-        self.grxtd = np.fft.ifft(self.grxfd, axis=0)
-        self.gtxtd = np.fft.ifft(self.gtxfd, axis=0)
+        if self.file_version == 0:
+            txtd, rxtd = self.load_data(path)
+    
+            # Compute the TX freq domain
+            txfd = np.fft.fft(txtd, axis=0)  # (nfft,ntx)
+            rxfd = np.fft.fft(rxtd, axis=0)  # (nfft,nrx,nframe)
+    
+            # Average over the different frames
+            rxfd = np.mean(rxfd[:,:,:nframe_avg], axis=2)
+    
+            # Noise level assumed for the MMSE 
+            snr = 40
+            wvar = np.mean(np.abs(rxfd)**2)*(10**(-snr/10))
+    
+            # Compute the RX calibration response.
+            # This only works for ntx=1.
+            # Also, we do not average over multiple frames
+            S = np.conj(txfd[:,0])/(np.abs(txfd[:,0])**2 + wvar)
+            self.grxfd = S[:,None]*rxfd
+            self.gtxfd = np.ones((self.nfft, self.ntx), dtype=np.complex64)
+    
+            # Compute the time-domain response
+            self.grxtd = np.fft.ifft(self.grxfd, axis=0)
+            self.gtxtd = np.fft.ifft(self.gtxfd, axis=0)
+            
+        else:
+            h_est = self.load_data(path)
+            self.grxtd = np.mean(h_est[:,:,0,:nframe_avg], axis=2)
+            self.grxfd = np.fft.fft(self.grxtd, axis=0)
+            self.gtxfd = np.ones((self.nfft, self.ntx), dtype=np.complex64)
 
     def load_chan_data(self, path):
         """
@@ -117,39 +134,46 @@ class Deconv(object):
         path : str
             Path to the file
         """
-        txtd, rxtd = self.load_data(path)
-
-        # Save the response
-        self.txtd = txtd
-        self.rxtd = rxtd
+        if self.file_version == 0:
+            txtd, rxtd = self.load_data(path)
+    
+            # Save the response
+            self.txtd = txtd
+            self.rxtd = rxtd
+        else:
+            self.chan_td = self.load_data(path)
+            
 
     def compute_chan_resp(self):
         """
         Compute the channel response
 
         """
-        # Compute the TX freq domain
-        txfd = np.fft.fft(self.txtd, axis=0)  # (nfft,ntx)
-        rxfd = np.fft.fft(self.rxtd, axis=0)  # (nfft,nrx,nframe)
-
-        # Noise level assumed for the MMSE 
-        snr = 40
-        wvar = np.mean(np.abs(rxfd)**2)*(10**(-snr/10))
-
-        # Initialize the MIMO response
-        nframe = self.rxtd.shape[2]
-        self.chan_fd = np.zeros((self.nfft, self.nrx, self.ntx, nframe),
-                                dtype=np.complex64)
-
-        # Compute the MIMO response via the Wiener filter
-        for itx in range(self.ntx):
-            for irx in range(self.nrx):
-                g = txfd[:,itx]*self.gtxfd[:,itx]*self.grxfd[:,irx]
-                S = np.conj(g)/(np.abs(g)**2 + wvar)
-                self.chan_fd[:,irx,itx,:] = S[:,None]*rxfd[:,irx,:]
-
-        # Compute the time-domain response
-        self.chan_td = np.fft.ifft(self.chan_fd, axis=0)
+        if self.file_version == 0:
+            # Compute the TX freq domain
+            txfd = np.fft.fft(self.txtd, axis=0)  # (nfft,ntx)
+            rxfd = np.fft.fft(self.rxtd, axis=0)  # (nfft,nrx,nframe)
+    
+            # Noise level assumed for the MMSE 
+            snr = 40
+            wvar = np.mean(np.abs(rxfd)**2)*(10**(-snr/10))
+    
+            # Initialize the MIMO response
+            nframe = self.rxtd.shape[2]
+            self.chan_fd = np.zeros((self.nfft, self.nrx, self.ntx, nframe),
+                                    dtype=np.complex64)
+    
+            # Compute the MIMO response via the Wiener filter
+            for itx in range(self.ntx):
+                for irx in range(self.nrx):
+                    g = txfd[:,itx]*self.gtxfd[:,itx]*self.grxfd[:,irx]
+                    S = np.conj(g)/(np.abs(g)**2 + wvar)
+                    self.chan_fd[:,irx,itx,:] = S[:,None]*rxfd[:,irx,:]
+    
+            # Compute the time-domain response
+            self.chan_td = np.fft.ifft(self.chan_fd, axis=0)
+        else:
+            self.chan_fd = np.fft.fft(self.chan_td, axis=0)
 
     def set_system_resp(self, grxfd):
         """
@@ -161,7 +185,7 @@ class Deconv(object):
             System response
 
         """
-        self.g = g
+        self.g = grxfd
 
     def set_system_rect_resp(self, nsc, dc_block=True):
         """
@@ -247,13 +271,22 @@ class Deconv(object):
             cv_dec = (1 - 2*np.sum(1/t)/self.nfft)
         else:
             if (nframe < nframe_avg):
-                raise ValueError('Not enough frames for averaging')
-            self.chan_fd_tr = self.chan_fd[:,0,0,:nframe_avg]
+                raise ValueError('Not enough f  rames for averaging')
+            self.chan_fd_tr = np.mean(self.chan_fd[:,0,0,:nframe_avg],axis=1)
         self.chan_td_tr = np.fft.ifft(self.chan_fd_tr, axis=0)
+        
+        # Roll training and test so that the peak is at index = 0
+        idx = np.argmax(np.abs(self.chan_td_tr))
+        self.chan_td_tr = np.roll(self.chan_td_tr, -idx)
+        self.chan_fd_tr *= np.exp(2*np.pi*1j*idx*np.arange(self.nfft)/self.nfft)
+        if cv:
+            self.chan_fd_ts *= np.exp(2*np.pi*1j*idx*np.arange(self.nfft)/self.nfft)
 
         # Set the delays to test around the peak
         idx = np.argmax(np.abs(self.chan_td_tr))
-        self.dly_test = (idx + np.linspace(drange[0],drange[1],ndly))/self.fsamp
+        self.dly_test = (idx + np.linspace(drange[0],drange[1],ndly))  
+        self.dly_test = self.dly_test - (self.dly_test > self.nfft/2)*self.nfft
+        self.dly_test /= self.fsamp
 
         # Create the basis vectors
         self.B = self.create_chan_resp(self.dly_test, basis=True)

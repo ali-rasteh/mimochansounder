@@ -17,20 +17,24 @@ nfft=1024   # Number of FFT points
 nrx = 1     # Number of RX antennas
 ntx = 1     # Number of TX antennas
 nframe_avg = 1 # number of frames for averaging
+file_version = 1  # Set to 1 for the latest version
 
 # Get the file path for the calibration data
-fn = 'siso_trx_cabled.npz'
+fn = 'chamber.npz'
 calib_path = os.path.join(os.getcwd(), 'data')
 calib_path = os.path.join(calib_path, fn)
 
 # Get the file path for the calibration data
-fn = 'siso_trx_OTA.npz'
+fn = 'wall_reflection.npz'
 data_path = os.path.join(os.getcwd(), 'data')
 data_path = os.path.join(data_path, fn)
 
 # Create a deconvolution object
 dec = Deconv(fc=fc, fsamp=fsamp, nfft=nfft,
-             ntx=ntx, nrx=nrx)
+             ntx=ntx, nrx=nrx, file_version=file_version)
+
+h_est = dec.load_data(calib_path)
+hpow = 10*np.log10(np.abs(h_est)**2)
 
 # Set the system response
 dec.set_system_resp_data(path=calib_path,
@@ -42,22 +46,23 @@ dec.compute_chan_resp()
 
 
 # Perform the sparse estimation
-dec.sparse_est(npaths=20, nframe_avg=nframe_avg,
-               drange=[-6,32], ndly=5000)
-
-
+dec.sparse_est(npaths=10, nframe_avg=nframe_avg,
+               drange=[-32,64], ndly=5000, cv=True)
+    
+    
 # Plot the raw response
 dly = np.arange(nfft) 
-dly = dly - nfft*(dly > nfft/2)
+dly = dly - nfft*(dly > 0.9*nfft)
 dly = dly / fsamp
 chan_pow = 20*np.log10(np.abs(dec.chan_td_tr))
 
-# Roll the response and shift the response
-rots = 32
+# Roll and shift the response
+rots = 32  # Rotation 
 yshift = np.percentile(chan_pow, 25)
+ntaps = 128
 chan_powr = np.roll(chan_pow, rots) - yshift
 dlyr = np.roll(dly, rots)
-plt.plot(dlyr[:128]*1e9, chan_powr[:128])
+plt.plot(dlyr[:ntaps]*1e9, chan_powr[:ntaps])
 plt.grid()
 
 # Compute the axes
@@ -69,7 +74,7 @@ scale = np.mean(np.abs(dec.grxfd))**2
 peaks  = 10*np.log10(np.abs(dec.coeffs_est)**2 * scale  )-yshift
 plt.stem(dec.dly_est*1e9, peaks, 'r-', basefmt='', bottom=ymin)
 plt.ylim([ymin, ymax])
-plt.xlabel('Delay [ns]')
+plt.xlabel('Relative delay [ns]')
 plt.ylabel('SNR [dB]')
 
-#plt.savefig('peaks.png')
+plt.savefig('peaks.png')
