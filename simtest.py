@@ -33,6 +33,8 @@ sim = Sim(fc=fc, fsamp=fsamp, nantrx=nantrx,
           rxlocsep=rxlocsep, antsep=antsep, npath=npath,
           tx=xtx,npath_est=npath_est)
 
+plt.plot(np.arange(len(sim.chan_td[:100,0,0])), 20*np.log10(np.abs(sim.chan_td[:100,0,0])))
+plt.show()
 
 if (plot_type == 'init_est') or (plot_type == 'iter_est'):
     """
